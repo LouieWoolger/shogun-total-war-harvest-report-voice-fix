@@ -43,10 +43,13 @@ class InspectResult:
     exe_path: Path
     sha256: str
     state: str
+    combined_state: str
     patchable: bool
     supported_state: bool
+    unit_fix_present: bool
     audio_fix_present: bool
     harvest_fix_present: bool
+    known_hash_state: str | None
     english_harvest_mp3_assets_present: bool
     japanese_harvest_mp3_assets_present: bool
     backup_path: Path
@@ -120,6 +123,73 @@ CODE_CAVE_PATCH = BytePatch(
 
 HARVEST_PATCHES = (SUFFIX_PATCH, HOOK_PATCH, CODE_CAVE_PATCH)
 
+UNIT_PATCHES = (
+    BytePatch(
+        name="RecruitCostSizeScalar",
+        offset=0x001364BC,
+        va=0x005364BC,
+        original=bytes.fromhex("A1 60 04 C7 00"),
+        patched=bytes.fromhex("B8 3C 00 00 00"),
+        description="Force the shared recruit-cost getter to use size 60.",
+    ),
+    BytePatch(
+        name="SupportCostSumTail",
+        offset=0x00135792,
+        va=0x00535792,
+        original=bytes.fromhex("8B C6 83 C4 04 5E 5F C3 8B F6 90 90 90 90"),
+        patched=bytes.fromhex("E9 37 54 1E 00 90 90 90 90 90 90 90 90 90"),
+        description="Redirect the support-cost return path to the normalizer code cave.",
+    ),
+    BytePatch(
+        name="SupportCostCodeCave",
+        offset=0x0031ABCE,
+        va=0x0071ABCE,
+        original=bytes(18),
+        patched=bytes.fromhex("8B C6 6B C0 3C 99 F7 3D 60 04 C7 00 83 C4 04 5E 5F C3"),
+        description="Normalize support totals back to 60-man economics before returning.",
+    ),
+    BytePatch(
+        name="TrainingTimeInitLoopCompare",
+        offset=0x0015C550,
+        va=0x0055C550,
+        original=bytes.fromhex("83 F8 64"),
+        patched=bytes.fromhex("83 F8 7F"),
+        description="Raise the loop-based training-time threshold above stock unit sizes.",
+    ),
+    BytePatch(
+        name="TrainingTimeInitLoopSpecialCompare",
+        offset=0x0015C57E,
+        va=0x0055C57E,
+        original=bytes.fromhex("83 F8 64"),
+        patched=bytes.fromhex("83 F8 7F"),
+        description="Keep the special 4-season entry from becoming 8 seasons at size 120.",
+    ),
+    BytePatch(
+        name="TrainingTimeInitUnrolledCompare",
+        offset=0x0017CAEE,
+        va=0x0057CAEE,
+        original=bytes.fromhex("83 F8 64"),
+        patched=bytes.fromhex("83 F8 7F"),
+        description="Raise the unrolled training-time threshold above stock unit sizes.",
+    ),
+    BytePatch(
+        name="TrainingTimeDoublePassACompare",
+        offset=0x001BFA08,
+        va=0x005BFA08,
+        original=bytes.fromhex("83 FA 64"),
+        patched=bytes.fromhex("83 FA 7F"),
+        description="Prevent the first late training-time doubling pass from firing at size 120.",
+    ),
+    BytePatch(
+        name="TrainingTimeDoublePassBCompare",
+        offset=0x002E3213,
+        va=0x006E3213,
+        original=bytes.fromhex("83 F8 64"),
+        patched=bytes.fromhex("83 F8 7F"),
+        description="Prevent the second late training-time doubling pass from firing at size 120.",
+    ),
+)
+
 AUDIO_FIX_PATCHES = (
     BytePatch(
         "AudioEosCheckEntry",
@@ -185,6 +255,15 @@ AUDIO_FIX_PATCHES = (
 
 RELEASE_PATCHES = AUDIO_FIX_PATCHES + HARVEST_PATCHES
 
+KNOWN_STATE_HASHES = {
+    "original": ORIGINAL_GOLD_SHA256,
+    "unit_fix_only": "A6CECD32946C10B152ADBC8D922BEAC8A67F7A639E6C4A10297297310C427285",
+    "audio_fix_only": "11356636154934CC2FF2ED26B46FD82155C05EB52873FE6763F7FD22B1344D32",
+    "unit_audio_fixes": "141C971763DC50AC2D5DD131E7FECAE87914C96FDB87B4EF25820E3B7A8C89DC",
+    "audio_harvest_fixes": PATCHED_AUDIO_AND_HARVEST_SHA256,
+    "unit_audio_harvest_fixes": "1154B5703769809D56B80DDB5B25BD98DEE2DED19721AEEFA9254D3EB81A9F78",
+}
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest().upper()
@@ -196,6 +275,13 @@ def sha256_path(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest().upper()
+
+
+def find_known_hash_state(sha256_hex: str) -> str | None:
+    for state_key, known_hash in KNOWN_STATE_HASHES.items():
+        if sha256_hex == known_hash:
+            return state_key
+    return None
 
 
 def resolve_exe(target: str | Path) -> Path:
@@ -248,6 +334,26 @@ def group_state(data: bytes, patches: tuple[BytePatch, ...]) -> tuple[str, tuple
     return "partial", ()
 
 
+def combined_state_from_groups(unit_state: str, audio_state: str, harvest_state: str) -> str:
+    if "unknown" in {unit_state, audio_state, harvest_state} or "partial" in {unit_state, audio_state, harvest_state}:
+        return "unknown_unsupported"
+    if harvest_state == "patched" and audio_state != "patched":
+        return "unknown_unsupported"
+    if unit_state == "clean" and audio_state == "clean" and harvest_state == "clean":
+        return "original"
+    if unit_state == "patched" and audio_state == "clean" and harvest_state == "clean":
+        return "unit_fix_only"
+    if unit_state == "clean" and audio_state == "patched" and harvest_state == "clean":
+        return "audio_fix_only"
+    if unit_state == "patched" and audio_state == "patched" and harvest_state == "clean":
+        return "unit_audio_fixes"
+    if unit_state == "clean" and audio_state == "patched" and harvest_state == "patched":
+        return "audio_harvest_fixes"
+    if unit_state == "patched" and audio_state == "patched" and harvest_state == "patched":
+        return "unit_audio_harvest_fixes"
+    return "unknown_unsupported"
+
+
 def inspect_exe(target: str | Path) -> InspectResult:
     exe_path = resolve_exe(target)
     data = exe_path.read_bytes()
@@ -259,8 +365,10 @@ def inspect_exe(target: str | Path) -> InspectResult:
 
     audio_state, audio_notes = group_state(data, AUDIO_FIX_PATCHES)
     harvest_state, harvest_notes = group_state(data, HARVEST_PATCHES)
+    unit_state, unit_notes = group_state(data, UNIT_PATCHES)
     notes.extend(audio_notes)
     notes.extend(harvest_notes)
+    notes.extend(unit_notes)
 
     english_assets = harvest_mp3_assets_present(exe_path.parent, "Voices")
     japanese_assets = harvest_mp3_assets_present(exe_path.parent, "Foices")
@@ -269,7 +377,9 @@ def inspect_exe(target: str | Path) -> InspectResult:
     if not japanese_assets:
         notes.append("missing_japanese_harvest_mp3_assets root=Foices\\Throne\\Messenger\\Harvest")
 
-    if "unknown" in {audio_state, harvest_state}:
+    combined_state = combined_state_from_groups(unit_state, audio_state, harvest_state)
+
+    if combined_state == "unknown_unsupported":
         state = "unknown"
     elif audio_state == "patched" and harvest_state == "patched":
         state = "patched"
@@ -280,15 +390,19 @@ def inspect_exe(target: str | Path) -> InspectResult:
 
     supported_state = state in {"clean", "partial", "patched"} and len(data) == EXPECTED_EXE_SIZE
     patchable = supported_state and state != "patched"
+    known_hash_state = find_known_hash_state(digest)
 
     return InspectResult(
         exe_path=exe_path,
         sha256=digest,
         state=state,
+        combined_state=combined_state,
         patchable=patchable,
         supported_state=supported_state,
+        unit_fix_present=unit_state == "patched",
         audio_fix_present=audio_state == "patched",
         harvest_fix_present=harvest_state == "patched",
+        known_hash_state=known_hash_state,
         english_harvest_mp3_assets_present=english_assets,
         japanese_harvest_mp3_assets_present=japanese_assets,
         backup_path=backup_path(exe_path),
@@ -379,10 +493,13 @@ def print_inspection(result: InspectResult) -> None:
     print(f"target={result.exe_path}")
     print(f"sha256={result.sha256}")
     print(f"state={result.state}")
+    print(f"combined_state={result.combined_state}")
     print(f"patchable={'yes' if result.patchable else 'no'}")
     print(f"supported_state={'yes' if result.supported_state else 'no'}")
+    print(f"unit_fix_present={'yes' if result.unit_fix_present else 'no'}")
     print(f"audio_fix_present={'yes' if result.audio_fix_present else 'no'}")
     print(f"harvest_restoration_fix_present={'yes' if result.harvest_fix_present else 'no'}")
+    print(f"known_reference_hash={result.known_hash_state if result.known_hash_state else 'no'}")
     print(
         "english_harvest_mp3_assets_present="
         f"{'yes' if result.english_harvest_mp3_assets_present else 'no'}"
