@@ -1,4 +1,4 @@
-# Shogun: Total War Gold - Harvest Report Restoration Fix
+# Shogun: Total War Gold - Harvest Report Voice Fix
 [![Downloads](https://img.shields.io/github/downloads/LouieWoolger/shogun-total-war-harvest-report-voice-fix/total?style=for-the-badge)](https://github.com/LouieWoolger/shogun-total-war-harvest-report-voice-fix/releases)
 [![Release](https://img.shields.io/github/v/release/LouieWoolger/shogun-total-war-harvest-report-voice-fix?style=for-the-badge)](https://github.com/LouieWoolger/shogun-total-war-harvest-report-voice-fix/releases/latest)
 [![Discord](https://img.shields.io/discord/1505490825889579018?style=for-the-badge&logo=discord&label=Discord&color=5865F2)](https://discord.gg/zKbDADqWRC)
